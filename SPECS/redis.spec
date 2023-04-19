@@ -7,48 +7,36 @@
 # Please preserve changelog entries
 #
 
-%if 0%{?fedora} >= 19 || 0%{?rhel} >= 7
-%global with_redistrib 1
-%else
-%global with_redistrib 0
-%endif
-
-%if 0%{?fedora} >= 19 || 0%{?rhel} >= 7
-%global with_systemd 1
-%else
-%global with_systemd 0
-%endif
+# temp workaround to https://bugzilla.redhat.com/2059488
+%undefine _package_note_file
 
 # Tests fail in mock, not in local build.
-%global with_tests %{?_with_tests:1}%{!?_with_tests:0}
+%bcond_with    tests
 
 # Commit IDs for the (unversioned) redis-doc repository
 # https://fedoraproject.org/wiki/Packaging:SourceURL "Commit Revision"
-%global doc_commit b9d39b104e0beff9e70b3d738c17d48491d6646a
+%global doc_commit c7880ba85fd67cb09110a4be790da47d4a6cec80
 %global short_doc_commit %(c=%{doc_commit}; echo ${c:0:7})
 
 # %%{rpmmacrodir} not usable on EL-6
 %global macrosdir %(d=%{_rpmconfigdir}/macros.d; [ -d $d ] || d=%{_sysconfdir}/rpm; echo $d)
 
 Name:              redis
-Version:           4.0.14
+Version:           6.2.12
 Release:           1%{?dist}
 Summary:           A persistent key-value database
-# redis, linenoise, lzf, hiredis are BSD
+# redis, jemalloc, linenoise, lzf, hiredis are BSD
 # lua is MIT
 License:           BSD and MIT
-URL:               http://redis.io
-Source0:           http://download.redis.io/releases/%{name}-%{version}.tar.gz
+URL:               https://redis.io
+Source0:           https://download.redis.io/releases/%{name}-%{version}.tar.gz
 Source1:           %{name}.logrotate
 Source2:           %{name}-sentinel.service
 Source3:           %{name}.service
-Source4:           %{name}-sentinel.init
-Source5:           %{name}.init
 Source6:           %{name}-shutdown
 Source7:           %{name}-limit-systemd
-Source8:           %{name}-limit-init
 Source9:           macros.%{name}
-Source10:          https://github.com/antirez/%{name}-doc/archive/%{doc_commit}/%{name}-doc-%{short_doc_commit}.tar.gz
+Source10:          https://github.com/%{name}/%{name}-doc/archive/%{doc_commit}/%{name}-doc-%{short_doc_commit}.tar.gz
 
 # To refresh patches:
 # tar xf redis-xxx.tar.gz && cd redis-xxx && git init && git add . && git commit -m "%%{version} baseline"
@@ -56,36 +44,35 @@ Source10:          https://github.com/antirez/%{name}-doc/archive/%{doc_commit}/
 # Then refresh your patches
 # git format-patch HEAD~<number of expected patches>
 # Update configuration for Fedora
-# https://github.com/antirez/redis/pull/3491 - man pages
+# https://github.com/redis/redis/pull/3491 - man pages
 Patch0001:         0001-1st-man-pageis-for-redis-cli-redis-benchmark-redis-c.patch
-# https://github.com/antirez/redis/pull/3494 - symlink
-Patch0002:         0002-install-redis-check-rdb-as-a-symlink-instead-of-dupl.patch
-BuildRequires:  gcc
-BuildRequires:     jemalloc-devel
-%if 0%{?with_tests}
+
+BuildRequires: make
+BuildRequires:     gcc
+%if %{with tests}
 BuildRequires:     procps-ng
 BuildRequires:     tcl
 %endif
-%if 0%{?with_systemd}
-BuildRequires:     systemd
-%endif
+BuildRequires:     pkgconfig(libsystemd)
+BuildRequires:     systemd-devel
+BuildRequires:     openssl-devel
+# redis-trib functionality migrated to redis-cli
+Obsoletes:         redis-trib < 5
 # Required for redis-shutdown
 Requires:          /bin/awk
 Requires:          logrotate
 Requires(pre):     shadow-utils
-%if 0%{?with_systemd}
 Requires(post):    systemd
 Requires(preun):   systemd
 Requires(postun):  systemd
-%else
-Requires(post):    chkconfig
-Requires(preun):   chkconfig
-Requires(preun):   initscripts
-Requires(postun):  initscripts
-%endif
-Provides:          bundled(hiredis)
-Provides:          bundled(lua-libs)
-Provides:          bundled(linenoise)
+# from deps/hiredis/hiredis.h
+Provides:          bundled(hiredis) = 0.14.0
+# from deps/jemalloc/VERSION
+Provides:          bundled(jemalloc) = 5.1.0
+# from deps/lua/src/lua.h
+Provides:          bundled(lua-libs) = 5.1.5
+# from deps/linenoise/linenoise.h
+Provides:          bundled(linenoise) = 1.0
 Provides:          bundled(lzf)
 
 %global redis_modules_abi 1
@@ -138,37 +125,20 @@ Conflicts:         redis < 4.0
 Manual pages and detailed documentation for many aspects of Redis use,
 administration and development.
 
-%if 0%{?with_redistrib}
-%package           trib
-Summary:           Cluster management script for Redis
-BuildArch:         noarch
-Requires:          ruby
-Requires:          rubygem-redis
-
-%description       trib
-Redis cluster management utility providing cluster creation, node addition
-and removal, status checks, resharding, rebalancing, and other operations.
-%endif
 
 %prep
 %setup -q -b 10
 %setup -q
 mv ../%{name}-doc-%{doc_commit} doc
-rm -frv deps/jemalloc
 %patch0001 -p1
-%patch0002 -p1
 
 mv deps/lua/COPYRIGHT    COPYRIGHT-lua
+mv deps/jemalloc/COPYING COPYING-jemalloc
 mv deps/hiredis/COPYING  COPYING-hiredis
 
-# Use system jemalloc library
-sed -i -e '/cd jemalloc && /d' deps/Makefile
-sed -i -e 's|../deps/jemalloc/lib/libjemalloc.a|-ljemalloc -ldl|g' src/Makefile
-sed -i -e 's|-I../deps/jemalloc.*|-DJEMALLOC_NO_DEMANGLE -I/usr/include/jemalloc|g' src/Makefile
-
-# Configuration file changes and additions
+# Configuration file changes
 sed -i -e 's|^logfile .*$|logfile /var/log/redis/redis.log|g' redis.conf
-sed -i -e '$ alogfile /var/log/redis/sentinel.log' sentinel.conf
+sed -i -e 's|^logfile .*$|logfile /var/log/redis/sentinel.log|g' sentinel.conf
 sed -i -e 's|^dir .*$|dir /var/lib/redis|g' redis.conf
 
 # Module API version safety check
@@ -179,11 +149,10 @@ if test "$api" != "%{redis_modules_abi}"; then
    exit 1
 fi
 
-%global malloc_flags	MALLOC=jemalloc
-%global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{optflags} -fPIC" %{malloc_flags} INSTALL="install -p" PREFIX=%{buildroot}%{_prefix}
+%global make_flags	DEBUG="" V="echo" LDFLAGS="%{?__global_ldflags}" CFLAGS+="%{optflags} -fPIC" INSTALL="install -p" PREFIX=%{buildroot}%{_prefix} BUILD_WITH_SYSTEMD=yes BUILD_TLS=yes
 
 %build
-make %{?_smp_mflags} %{make_flags} all
+%make_build %{make_flags} all
 
 %install
 make %{make_flags} install
@@ -198,11 +167,10 @@ install -d %{buildroot}%{redis_modules_dir}
 install -pDm644 %{S:1} %{buildroot}%{_sysconfdir}/logrotate.d/%{name}
 
 # Install configuration files.
-install -pDm640 %{name}.conf %{buildroot}%{_sysconfdir}/%{name}.conf
-install -pDm640 sentinel.conf %{buildroot}%{_sysconfdir}/%{name}-sentinel.conf
+install -pDm640 %{name}.conf  %{buildroot}%{_sysconfdir}/%{name}/%{name}.conf
+install -pDm640 sentinel.conf %{buildroot}%{_sysconfdir}/%{name}/sentinel.conf
 
 # Install systemd unit files.
-%if 0%{?with_systemd}
 mkdir -p %{buildroot}%{_unitdir}
 install -pm644 %{S:3} %{buildroot}%{_unitdir}
 install -pm644 %{S:2} %{buildroot}%{_unitdir}
@@ -210,11 +178,6 @@ install -pm644 %{S:2} %{buildroot}%{_unitdir}
 # Install systemd limit files (requires systemd >= 204)
 install -p -D -m 644 %{S:7} %{buildroot}%{_sysconfdir}/systemd/system/%{name}.service.d/limit.conf
 install -p -D -m 644 %{S:7} %{buildroot}%{_sysconfdir}/systemd/system/%{name}-sentinel.service.d/limit.conf
-%else # install SysV service files
-install -pDm755 %{S:4} %{buildroot}%{_initrddir}/%{name}-sentinel
-install -pDm755 %{S:5} %{buildroot}%{_initrddir}/%{name}
-install -p -D -m 644 %{S:8} %{buildroot}%{_sysconfdir}/security/limits.d/95-%{name}.conf
-%endif
 
 # Fix non-standard-executable-perm error.
 chmod 755 %{buildroot}%{_bindir}/%{name}-*
@@ -224,11 +187,6 @@ install -pDm755 %{S:6} %{buildroot}%{_libexecdir}/%{name}-shutdown
 
 # Install redis module header
 install -pDm644 src/%{name}module.h %{buildroot}%{_includedir}/%{name}module.h
-
-%if 0%{?with_redistrib}
-# Install redis-trib
-install -pDm755 src/%{name}-trib.rb %{buildroot}%{_bindir}/%{name}-trib
-%endif
 
 # Install man pages
 man=$(dirname %{buildroot}%{_mandir})
@@ -253,12 +211,8 @@ mkdir -p %{buildroot}%{macrosdir}
 install -pDm644 %{S:9} %{buildroot}%{macrosdir}/macros.%{name}
 
 %check
-%if 0%{?with_tests}
-# ERR Active defragmentation cannot be enabled: it requires a Redis server compiled
-# with a modified Jemalloc like the one shipped by default with the Redis source distribution
-sed -e '/memefficiency/d' -i tests/test_helper.tcl
-
-# https://github.com/antirez/redis/issues/1417 (for "taskset -c 1")
+%if %{with tests}
+# https://github.com/redis/redis/issues/1417 (for "taskset -c 1")
 taskset -c 1 make %{make_flags} test
 make %{make_flags} test-sentinel
 %endif
@@ -272,51 +226,50 @@ useradd -r -g %{name} -d %{_sharedstatedir}/%{name} -s /sbin/nologin \
 exit 0
 
 %post
-%if 0%{?with_systemd}
+if [ -f %{_sysconfdir}/%{name}.conf -a ! -L %{_sysconfdir}/%{name}.conf ]; then
+  if [ -f %{_sysconfdir}/%{name}/%{name}.conf.rpmnew ]; then
+    rm    %{_sysconfdir}/%{name}/%{name}.conf.rpmnew
+  fi
+  if [ -f %{_sysconfdir}/%{name}/%{name}.conf ]; then
+    mv    %{_sysconfdir}/%{name}/%{name}.conf %{_sysconfdir}/%{name}/%{name}.conf.rpmnew
+  fi
+  mv %{_sysconfdir}/%{name}.conf %{_sysconfdir}/%{name}/%{name}.conf
+  echo -e "\nWarning: %{name} configuration is now in %{_sysconfdir}/%{name} directory\n"
+fi
+if [ -f %{_sysconfdir}/%{name}-sentinel.conf  -a ! -L %{_sysconfdir}/%{name}-sentinel.conf  ]; then
+  if [ -f %{_sysconfdir}/%{name}/sentinel.conf.rpmnew ]; then
+    rm    %{_sysconfdir}/%{name}/sentinel.conf.rpmnew
+  fi
+  if [ -f %{_sysconfdir}/%{name}/sentinel.conf ]; then
+    mv    %{_sysconfdir}/%{name}/sentinel.conf %{_sysconfdir}/%{name}/sentinel.conf.rpmnew
+  fi
+  mv %{_sysconfdir}/%{name}-sentinel.conf %{_sysconfdir}/%{name}/sentinel.conf
+fi
 %systemd_post %{name}.service
 %systemd_post %{name}-sentinel.service
-%else
-chkconfig --add %{name}
-chkconfig --add %{name}-sentinel
-%endif
 
 %preun
-%if 0%{?with_systemd}
 %systemd_preun %{name}.service
 %systemd_preun %{name}-sentinel.service
-%else
-if [ $1 -eq 0 ] ; then
-    service %{name} stop &> /dev/null
-    chkconfig --del %{name} &> /dev/null
-    service %{name}-sentinel stop &> /dev/null
-    chkconfig --del %{name}-sentinel &> /dev/null
-fi
-%endif
 
 %postun
-%if 0%{?with_systemd}
 %systemd_postun_with_restart %{name}.service
 %systemd_postun_with_restart %{name}-sentinel.service
-%else
-if [ "$1" -ge "1" ] ; then
-    service %{name} condrestart >/dev/null 2>&1 || :
-    service %{name}-sentinel condrestart >/dev/null 2>&1 || :
-fi
-%endif
 
 %files
 %{!?_licensedir:%global license %%doc}
 %license COPYING
+%license COPYRIGHT-lua
+%license COPYING-jemalloc
+%license COPYING-hiredis
 %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
-%attr(0640, redis, root) %config(noreplace) %{_sysconfdir}/%{name}.conf
-%attr(0640, redis, root) %config(noreplace) %{_sysconfdir}/%{name}-sentinel.conf
+%attr(0750, redis, root) %dir %{_sysconfdir}/%{name}
+%attr(0640, redis, root) %config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf
+%attr(0640, redis, root) %config(noreplace) %{_sysconfdir}/%{name}/sentinel.conf
 %dir %attr(0750, redis, redis) %{_libdir}/%{name}
 %dir %attr(0750, redis, redis) %{redis_modules_dir}
 %dir %attr(0750, redis, redis) %{_sharedstatedir}/%{name}
 %dir %attr(0750, redis, redis) %{_localstatedir}/log/%{name}
-%if 0%{?with_redistrib}
-%exclude %{_bindir}/%{name}-trib
-%endif
 %exclude %{macrosdir}
 %exclude %{_includedir}
 %exclude %{_docdir}/%{name}/*
@@ -324,7 +277,6 @@ fi
 %{_libexecdir}/%{name}-*
 %{_mandir}/man1/%{name}*
 %{_mandir}/man5/%{name}*
-%if 0%{?with_systemd}
 %{_unitdir}/%{name}.service
 %{_unitdir}/%{name}-sentinel.service
 %dir %{_sysconfdir}/systemd/system/%{name}.service.d
@@ -332,34 +284,178 @@ fi
 %dir %{_sysconfdir}/systemd/system/%{name}-sentinel.service.d
 %config(noreplace) %{_sysconfdir}/systemd/system/%{name}-sentinel.service.d/limit.conf
 %dir %attr(0755, redis, redis) %ghost %{_localstatedir}/run/%{name}
-%else
-%{_initrddir}/%{name}
-%{_initrddir}/%{name}-sentinel
-%config(noreplace) %{_sysconfdir}/security/limits.d/95-%{name}.conf
-%dir %attr(0755, redis, redis) %{_localstatedir}/run/%{name}
-%endif
 
 %files devel
+# main package is not required
 %license COPYING
-%license COPYRIGHT-lua
-%license COPYING-hiredis
 %{_includedir}/%{name}module.h
 %{macrosdir}/*
 
 %files doc
+# specific for documentation (CC-BY-SA)
+%license doc/LICENSE
 %docdir %{_docdir}/%{name}
 %{_docdir}/%{name}
 
-%if 0%{?with_redistrib}
-%files trib
-%license COPYING
-%{_bindir}/%{name}-trib
-%endif
-
 
 %changelog
-* Sat Jan 25 2020 Matt Saladna <matt@apisnetworks.com> - 4.0.14-1
-- Upstream 4.0.14 release.
+* Tue Apr 18 2023 Remi Collet <remi@remirepo.net> - 6.2.12-1
+- Upstream 6.2.12 release.
+
+* Wed Mar  1 2023 Remi Collet <remi@remirepo.net> - 6.2.11-1
+- Upstream 6.2.11 release.
+
+* Wed Jan 18 2023 Remi Collet <remi@remirepo.net> - 6.2.10-1
+- Upstream 6.2.10 release.
+
+* Tue Jan 17 2023 Remi Collet <remi@remirepo.net> - 6.2.9-1
+- Upstream 6.2.9 release.
+
+* Tue Dec 13 2022 Remi Collet <remi@remirepo.net> - 6.2.8-1
+- Upstream 6.2.8 release.
+
+* Thu Apr 28 2022 Remi Collet <remi@remirepo.net> - 6.2.7-1
+- Upstream 6.2.7 release.
+
+* Fri Jan 21 2022 Fedora Release Engineering <releng@fedoraproject.org> - 6.2.6-3
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_36_Mass_Rebuild
+
+* Wed Nov  3 2021 Remi Collet <remi@remirepo.net> - 6.2.6-2
+- use proper license in dec/devel sub-packages
+
+* Mon Oct  4 2021 Remi Collet <remi@remirepo.net> - 6.2.6-1
+- Upstream 6.2.6 release.
+
+* Tue Sep 14 2021 Sahana Prasad <sahana@redhat.com> - 6.2.5-2
+- Rebuilt with OpenSSL 3.0.0
+
+* Thu Jul 22 2021 Nathan Scott <nathans@redhat.com> - 6.2.5-1
+- Upstream 6.2.5 release (RHBZ #1984631).
+- Fix CVE-2021-32761: 32-bit systems BITFIELD command integer overflow.
+
+* Wed Jun  2 2021 Remi Collet <remi@remirepo.net> - 6.2.4-1
+- Upstream 6.2.4 release.
+
+* Tue May  4 2021 Remi Collet <remi@remirepo.net> - 6.2.3-1
+- Upstream 6.2.3 release
+
+* Tue Apr 20 2021 Remi Collet <remi@remirepo.net> - 6.2.2-1
+- Upstream 6.2.2 release
+
+* Thu Apr 01 2021 Nathan Scott <nathans@redhat.com> - 6.2.1-1
+- Upstream 6.2.1 release
+- Merged make-macros spec change from Tom Stellard
+
+* Tue Mar 02 2021 Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl> - 6.2.0-2
+- Rebuilt for updated systemd-rpm-macros
+  See https://pagure.io/fesco/issue/2583.
+
+* Mon Mar 01 2021 Nathan Scott <nathans@redhat.com> - 6.2.0-1
+- Upstream 6.2.0 release (RHBZ #1915463).
+- drop patch merged upstream.
+
+* Wed Feb 24 2021 Nathan Scott <nathans@redhat.com> - 6.0.11-1
+- Upstream 6.0.11 release.
+
+* Wed Jan 27 2021 Fedora Release Engineering <releng@fedoraproject.org> - 6.0.10-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_34_Mass_Rebuild
+
+* Wed Jan 13 2021 Remi Collet <remi@remirepo.net> - 6.0.10-1
+- Upstream 6.0.10 release.
+
+* Tue Nov 24 2020 Remi Collet <remi@remirepo.net> - 6.0.9-3
+- fix check for regular file, not symlink
+
+* Mon Nov 23 2020 Remi Collet <remi@remirepo.net> - 6.0.9-2
+- move configuration in /etc/redis per upstream recommendation
+  see https://github.com/redis/redis/issues/8051
+
+* Tue Oct 27 2020 Remi Collet <remi@remirepo.net> - 6.0.9-1
+- Upstream 6.0.9 release.
+
+* Tue Oct 20 2020 Remi Collet <remi@remirepo.net> - 6.0.8-2
+- add missing LICENSE files in main package
+
+* Thu Sep 10 2020 Remi Collet <remi@remirepo.net> - 6.0.8-1
+- Upstream 6.0.8 release.
+
+* Tue Sep  1 2020 Remi Collet <remi@remirepo.net> - 6.0.7-1
+- Upstream 6.0.7 release.
+- drop patch merged upstream
+
+* Wed Jul 29 2020 Fedora Release Engineering <releng@fedoraproject.org> - 6.0.6-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_33_Mass_Rebuild
+
+* Tue Jul 21 2020 Remi Collet <rcollet@redhat.com> - 6.0.6-1
+- Upstream 6.0.6 release.
+- drop patch merged upstream
+- open https://github.com/redis/redis/pull/7543 fix deprecated tail syntax
+
+* Wed Jun 10 2020 Nathan Scott <nathans@redhat.com> - 6.0.5-1
+- Upstream 6.0.5 release.
+
+* Thu May 28 2020 Remi Collet <remi@remirepo.net> - 6.0.4-3
+- Add comment for TimeoutStartSec and TimeoutStopSec in limit.conf
+- Fix missing notification to systemd for sentinel
+  patch from https://github.com/redis/redis/pull/7168
+- Upstream 6.0.4 release.
+
+* Mon May 18 2020 Nathan Scott <nathans@redhat.com> - 6.0.3-1
+- Upstream 6.0.3 release.
+
+* Wed May  6 2020 Remi Collet <rcollet@redhat.com> - 6.0.1-1
+- Upstream 6.0.1 release.
+
+* Fri May 01 2020 Nathan Scott <nathans@redhat.com> - 6.0.0-1
+- Upstream 6.0.0 release.
+
+* Fri Mar 13 2020 Nathan Scott <nathans@redhat.com> - 5.0.8-1
+- Upstream 5.0.8 release.
+
+* Wed Feb 12 2020 Nathan Scott <nathans@redhat.com> - 5.0.7-3
+- Patch extern SDS_NOINIT definition for gcc 10 (RHBZ #1799969)
+
+* Thu Jan 30 2020 Fedora Release Engineering <releng@fedoraproject.org> - 5.0.7-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_32_Mass_Rebuild
+
+* Tue Nov 19 2019 Carl George <carl@george.computer> - 5.0.7-1
+- Latest upstream
+
+* Thu Sep 26 2019 Nathan Scott <nathans@redhat.com> - 5.0.6-1
+- Upstream 5.0.6 release and redis-doc updates.
+
+* Fri Jul 26 2019 Fedora Release Engineering <releng@fedoraproject.org> - 5.0.5-3
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_31_Mass_Rebuild
+
+* Mon Jul 15 2019 Nathan Scott <nathans@redhat.com> - 5.0.5-2
+- Use the (modified) bundled jemalloc for defrag (RHBZ #1725852)
+
+* Thu May 16 2019 Nathan Scott <nathans@redhat.com> - 5.0.5-1
+- Upstream 5.0.5 release and redis-doc updates.
+
+* Sat May 11 2019 Nathan Scott <nathans@redhat.com> - 5.0.4-2
+- Obsolete redis-trib - functionality now in redis-cli(1)
+- Remove old chkconfig support, all systemd platforms now
+
+* Tue Mar 19 2019 Nathan Scott <nathans@redhat.com> - 5.0.4-1
+- Upstream 5.0.4 release and redis-doc updates.
+- Fix sentinel.conf logfile line addition.
+
+* Sat Feb 02 2019 Fedora Release Engineering <releng@fedoraproject.org> - 5.0.3-2
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_30_Mass_Rebuild
+
+* Thu Dec 13 2018 Nathan Scott <nathans@redhat.com> - 5.0.3-1
+- Upstream 5.0.3 release and redis-doc updates.
+
+* Fri Nov 23 2018 Nathan Scott <nathans@redhat.com> - 5.0.2-1
+- Upstream 5.0.2 release and redis-doc updates.
+
+* Thu Nov 08 2018 Nathan Scott <nathans@redhat.com> - 5.0.1-1
+- Upstream 5.0.1 release.
+
+* Thu Oct 18 2018 Nathan Scott <nathans@redhat.com> - 5.0.0-1
+- Update systemd service files for network-online requirement
+- Upstream 5.0.0 release.
 
 * Thu Aug 09 2018 Nathan Scott <nathans@redhat.com> - 4.0.11-1
 - Drop the pandoc build dependency, install only markdown.
@@ -465,11 +561,11 @@ fi
 
 * Wed Sep 14 2016 Remi Collet <remi@fedoraproject.org> - 3.2.3-2
 - add missing man pages #1374577
-  using patch from https://github.com/antirez/redis/pull/3491
+  using patch from https://github.com/redis/redis/pull/3491
 - data and configuration should not be publicly readable #1374700
 - remove /var/run/redis with systemd #1374728
 - provide redis-check-rdb as a symlink to redis-server #1374736
-  using patch from https://github.com/antirez/redis/pull/3494
+  using patch from https://github.com/redis/redis/pull/3494
 - move redis-shutdown to libexec
 
 * Thu Aug  4 2016 Haïkel Guémar <hguemar@fedoraproject.org> - 3.2.3-1
